@@ -1,0 +1,110 @@
+import os
+import time
+import threading
+from solana.publickey import PublicKey
+from solana.rpc.api import Client
+from solana.transaction import Transaction, TransactionInstruction
+from solana.account import Account
+from dotenv import load_dotenv
+from pyserum.connection import conn
+from pyserum.market import Market
+from pyserum.enums import OrderType, Side
+
+# Load environment variables from a .env file
+load_dotenv()
+
+# Initialize Solana client
+client = Client("https://api.mainnet-beta.solana.com")
+
+# Retrieve wallet and Raydium market details from environment variables
+private_key = os.getenv("47V5yD9vBRf7EyoMHH4MWgVcbcNfK6EjCpU8XaSEnhKYnz6giZfFG6TQv2VWM68xyjhqCNhvtJQuTrGGJAsJcwrS")
+wallet_address = os.getenv("3tTN1rWrdsWgRJsTzBCtcXVmWgG8ofRKT6HHFNaxhcpr")
+token_mint_address = os.getenv("EqGMz1o1KiBs1wtotR4rnDADEHvUu39Emv46ZjBEpump")
+raydium_market_address = os.getenv("14GW6UyoFDLvraMFQJyuLYkDAoZnXttxBfjuAsHWEAxH")
+
+# Define trading parameters
+buy_threshold = 1500  # Minimum amount for large buy order to trigger the bot's buy action
+spread_percentage = 0.01  # Spread percentage for sell orders to ensure profit
+trade_amount_usd = 100  # Amount in USD to trade per transaction
+
+# Establish connection to Serum DEX (Raydium uses Serum)
+serum_connection = conn("https://api.mainnet-beta.solana.com")
+serum_market = Market.load(serum_connection, PublicKey(raydium_market_address))
+
+def get_mempool_transactions():
+    # Fetch recent transactions from Solana's mempool
+    response = client.get_recent_blockhash()
+    if response['result']:
+        return response['result']['transactions']
+    return []
+
+def is_large_buy(transaction):
+    # Implement logic to detect large buy orders
+    # Placeholder logic: Assume transaction amount is provided directly in 'amount'
+    return transaction['amount'] > buy_threshold
+
+def execute_trade(order_type, amount, price):
+    # Execute trade on Raydium DEX
+    account = Account(private_key)
+    if order_type == "buy":
+        # Place buy order
+        transaction = serum_market.place_order(
+            payer=account,
+            owner=account.public_key(),
+            side=Side.BUY,
+            price=price,
+            size=amount,
+            order_type=OrderType.LIMIT
+        )
+        print(f"Buy order placed: {transaction}")
+    elif order_type == "sell":
+        # Place sell order
+        transaction = serum_market.place_order(
+            payer=account,
+            owner=account.public_key(),
+            side=Side.SELL,
+            price=price,
+            size=amount,
+            order_type=OrderType.LIMIT
+        )
+        print(f"Sell order placed: {transaction}")
+
+def process_transaction(transaction):
+    if is_large_buy(transaction):
+        # Calculate amount to buy based on trade_amount_usd and current price
+        price = transaction['price']
+        amount = trade_amount_usd / price
+
+        # Place buy order before large buy
+        execute_trade("buy", amount, price)
+
+        # Monitor for large buy order completion
+        def monitor_large_buy_completion():
+            while True:
+                updated_transactions = get_mempool_transactions()
+                for updated_transaction in updated_transactions:
+                    if updated_transaction['id'] == transaction['id'] and updated_transaction['status'] == 'confirmed':
+                        # Place sell order after large buy
+                        execute_trade("sell", amount, price * (1 + spread_percentage))
+                        return
+                time.sleep(0.5)  # Adjust frequency based on your needs
+
+        # Start monitoring in a separate thread
+        threading.Thread(target=monitor_large_buy_completion).start()
+
+def monitor_mempool():
+    while True:
+        transactions = get_mempool_transactions()
+        for transaction in transactions:
+            process_transaction(transaction)
+        time.sleep(1)  # Adjust frequency based on your needs
+
+def main():
+    # Initialize account
+    account = Account(private_key)
+
+    # Start monitoring mempool
+    monitor_mempool()
+
+if __name__ == "__main__":
+    main()
